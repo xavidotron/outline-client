@@ -12,15 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import * as net from 'net';
-import * as os from 'os';
-import * as sudo from 'sudo-prompt';
-
-import * as errors from '../www/model/errors';
-import {getServiceStartCommand} from './util';
-
-const SERVICE_NAME =
-    os.platform() === 'win32' ? '\\\\.\\pipe\\OutlineServicePipe' : '/var/run/outline_controller';
+import {createConnection, Socket} from 'net';
+import {platform} from 'os';
 
 interface RoutingServiceRequest {
   action: string;
@@ -46,136 +39,111 @@ enum RoutingServiceStatusCode {
   UNSUPPORTED_ROUTING_TABLE = 2
 }
 
-// Define the error type thrown by the net module.
-interface NetError extends Error {
-  code?: string|number;
-  errno?: string;
-  syscall?: string;
-  address?: string;
-}
+const SERVICE_ADDRESS =
+    platform() === 'win32' ? '\\\\.\\pipe\\OutlineServicePipe' : '/var/run/outline_controller';
 
-// Abstracts IPC with OutlineService in order to configure routing.
+// Communicates with the Outline routing daemon via a Unix socket.
+//
+// Works on both Windows and Linux.
+//
+// Due to the complexity of emulating a Promise-like interface (currently expected by the rest of
+// the system) on top of a pipe-like connection to the service, *multiple, concurrent calls to
+// start() or stop() are not recommended*. For this reason - and because on Windows multiple clients
+// cannot connect to the pipe concurrently - this class connects to the service for *as short a time
+// as possible*: CONFIGURE_ROUTING always uses a *new* connection to the service and the socket is
+// always closed after receiving a RESET_ROUTING response.
+//
+// TODO: network change notifications
 export class RoutingService {
-  // TODO: make this a constructor argument
-  private ipcConnection: net.Socket|null = null;
+  private socket?: Socket;
 
-  // Asks OutlineService to configure all traffic, except that bound for the proxy server,
-  // to route via routerIp.
-  configureRouting(
-      routerIp: string, proxyIp: string, onStatusChange: (status: ConnectionStatus) => void,
-      isAutoConnect = false): Promise<string> {
-    return this.sendRequest(
-        {
-          action: RoutingServiceAction.CONFIGURE_ROUTING,
-          parameters: {proxyIp, routerIp, isAutoConnect}
-        },
-        true, onStatusChange);
-  }
+  private disconnectionListener?: () => void;
 
-  // Restores the default system routes.
-  resetRouting(): Promise<string> {
-    try {
-      if (this.ipcConnection) {
-        this.ipcConnection.removeAllListeners();
-      }
-    } catch (e) {
-      // Ignore, the service may have disconnected the pipe.
+  private fulfillStart?: () => void;
+  private fulfillStop?: () => void;
+
+  // TODO: sets a member and returns that member for type-safety convenience - ugly?
+  // TODO: offer to install the service
+  private async getSocket(): Promise<Socket> {
+    if (this.socket) {
+      return this.socket;
     }
-    return this.sendRequest({action: RoutingServiceAction.RESET_ROUTING, parameters: {}});
-  }
 
-  // Helper method to perform IPC with the Windows Service. Prompts the user for admin permissions
-  // to start the service, in the event that it is not running.
-  private sendRequest(
-      request: RoutingServiceRequest, retry = true,
-      onStatusChange?: (status: ConnectionStatus) => void): Promise<string> {
-    return new Promise((resolve, reject) => {
-      if (!this.ipcConnection || this.ipcConnection.destroyed) {
-        this.ipcConnection = net.createConnection(SERVICE_NAME, () => {
-          console.log('Pipe connected');
-          try {
-            this.writeRequest(request);
-          } catch (e) {
-            reject(e);
+    return new Promise<Socket>((F, R) => {
+      // TODO: how long does the service take to restart - should we add a wait/retry?
+      const newSocket = createConnection(SERVICE_ADDRESS, () => {
+        console.log('connected to routing service');
+
+        newSocket.on('data', (data) => {
+          // This is very useful for debugging and *does not contain any PII*.
+          console.log(`received message from routing service: ${data.toString().trim()}`);
+          const res: RoutingServiceResponse = JSON.parse(data.toString());
+          switch (res.action) {
+            case RoutingServiceAction.CONFIGURE_ROUTING:
+              if (this.fulfillStart) {
+                this.fulfillStart();
+              }
+              break;
+            case RoutingServiceAction.RESET_ROUTING:
+              if (this.fulfillStop) {
+                this.fulfillStop();
+              }
+              newSocket.end();
+              break;
+            default:
+              console.error(`unexpected response type received from routing service`);
           }
         });
-      } else {
-        // We already have a connection, write the request.
-        try {
-          this.writeRequest(request);
-        } catch (e) {
-          reject(e);
-        }
-      }
-      this.ipcConnection.once('error', (e: NetError) => {
-        if (retry) {
-          console.info(`bouncing OutlineService (${e.errno})`);
-          sudo.exec(getServiceStartCommand(), {name: 'Outline'}, (sudoError, stdout, stderr) => {
-            if (sudoError) {
-              // Yes, this seems to be the only way to tell.
-              if ((typeof sudoError === 'string') &&
-                  sudoError.toLowerCase().indexOf('did not grant permission') >= 0) {
-                return reject(new errors.NoAdminPermissions());
-              } else {
-                // It's unclear what type sudoError is because it has no message
-                // field. toString() seems to work in most cases, so use that -
-                // anything else will eventually show up in Sentry.
-                return reject(new errors.SystemConfigurationException(sudoError.toString()));
-              }
-            }
-            // TODO: stdout/stderr are empty on Linux
-            console.info(`installed routing service (stdout: ${stdout}, stderr: ${stderr})`);
-            this.sendRequest(request, false).then(resolve, reject);
-          });
-          return;
-        } else {
-          reject(new Error(`Routing Daemon/Service is not running.`));
-        }
-        // OutlineService could not be (re-)started.
-        reject(new errors.SystemConfigurationException(
-            `Received error from service connection: ${e.message}`));
+
+        // Invoked as a result of calling end() *and* service/socket failure.
+        newSocket.once('close', () => {
+          console.log('disconnected from routing service');
+          newSocket.removeAllListeners();
+          this.socket = undefined;
+          if (this.disconnectionListener) {
+            this.disconnectionListener();
+          }
+        });
+
+        this.socket = newSocket;
+        F(newSocket);
       });
 
-      this.ipcConnection.on('data', (data) => {
-        if (data) {
-          try {
-            const response: RoutingServiceResponse = JSON.parse(data.toString());
-            if (onStatusChange && response.action === RoutingServiceAction.STATUS_CHANGED) {
-              onStatusChange(response.connectionStatus);
-              return response;
-            }
-            if (response.action !== request.action) {
-              // Don't resolve yet; we got a status change response. This can happen when connecting
-              // to a new server without previously disconnecting.
-              return;
-            }
-            console.log(`Got data from pipe for action: ${response.action}`);
-            if (response.statusCode !== RoutingServiceStatusCode.SUCCESS) {
-              const msg = `OutlineService says: ${response.errorMessage}`;
-              reject(
-                  response.statusCode === RoutingServiceStatusCode.UNSUPPORTED_ROUTING_TABLE ?
-                      new errors.UnsupportedRoutingTable(msg) :
-                      new errors.ConfigureSystemProxyFailure(msg));
-            }
-            return resolve(data.toString());
-          } catch (e) {
-            reject(new Error(`Failed to deserialize service response: ${e.message}`));
-          }
-        } else {
-          reject(new Error('Failed to receive data form routing service'));
-        }
+      // This is sufficient to detect a failure to connect initially; subsequent disconnections are
+      // handled by the close handler, above.
+      newSocket.once('error', (e) => {
+        R(new Error(`could not connect to routing service: ${e.message}`));
       });
     });
   }
 
-  // Helper method to write a RoutingServiceRequest to the connected pipe.
-  private writeRequest(request: RoutingServiceRequest): void {
-    try {
-      if (this.ipcConnection) {
-        this.ipcConnection.write(JSON.stringify(request));
-      }
-    } catch (e) {
-      throw new Error(`Failed to write request: ${e.message}`);
+  setDisconnectionListener(newListener?: () => void): void {
+    this.disconnectionListener = newListener;
+  }
+
+  // TODO: autoconnect
+  // TODO: constructor param for TUN device IP
+  async start(proxyAddress: string) {
+    // TODO: is this necessary and is there a better way?
+    if (this.socket) {
+      throw new Error('already connected, please call stop first');
     }
+
+    const socket = await this.getSocket();
+    socket.write(JSON.stringify({
+      action: RoutingServiceAction.CONFIGURE_ROUTING,
+      parameters: {'proxyIp': proxyAddress, 'routerIp': '10.0.85.1', 'isAutoConnect': false}
+    }));
+    return new Promise<void>((F) => {
+      this.fulfillStart = F;
+    });
+  }
+
+  async stop() {
+    const socket = await this.getSocket();
+    socket.write(JSON.stringify({action: RoutingServiceAction.RESET_ROUTING, parameters: {}}));
+    return new Promise<void>((F) => {
+      this.fulfillStop = F;
+    });
   }
 }

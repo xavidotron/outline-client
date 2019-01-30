@@ -20,6 +20,12 @@ import * as socks from 'socks';
 import * as util from '../www/app/util';
 import * as errors from '../www/model/errors';
 
+import {SsLocal, Tun2socks} from './processes';
+import {RoutingService} from './routing';
+
+const PROXY_ADDRESS = '127.0.0.1';
+const PROXY_PORT = 1081;
+
 const CREDENTIALS_TEST_DOMAINS = ['example.com', 'ietf.org', 'wikipedia.org'];
 const REACHABILITY_TEST_TIMEOUT_MS = 10000;
 const DNS_LOOKUP_TIMEOUT_MS = 10000;
@@ -41,6 +47,66 @@ const DNS_REQUEST = Buffer.from([
   0, 1,                             // QTYPE, set to A
   0, 1                              // QCLASS, set to 1 = IN (Internet)
 ]);
+
+// Coordinates routing and helper processes to establish a full-system VPN.
+// Follows the Mediator pattern.
+//
+// TODO: test for UDP support
+// TODO: restart tun2socks when UDP support changes
+export class ConnectionMediator {
+  private routing = new RoutingService();
+  private ssLocal = new SsLocal(PROXY_PORT);
+  private tun2socks = new Tun2socks(PROXY_ADDRESS, PROXY_PORT);
+
+  // ugh horrible
+  private currentId: string|undefined;
+
+  private listener?: (status: ConnectionStatus, connectionId: string) => void;
+
+  setListener(listener: (status: ConnectionStatus, connectionId: string) => void) {
+    this.listener = listener;
+  }
+
+  private setHelperListeners(newListener?: () => void) {
+    this.routing.setDisconnectionListener(newListener);
+    this.ssLocal.setExitListener(newListener);
+    this.tun2socks.setExitListener(newListener);
+  }
+
+  // TODO: stop if already started?
+  // TODO: check reachability
+  // TODO: reject with error codes
+  async start(config: cordova.plugins.outline.ServerConfig, id: string) {
+    console.log('starting connection helper processes...');
+    this.currentId = id;
+
+    this.setHelperListeners(this.onExitOrFailure.bind(this));
+
+    await this.routing.start(config.host || '');
+    this.tun2socks.start();
+    this.ssLocal.start(config);
+  }
+
+  private onExitOrFailure() {
+    console.error('one or more connection helper processes failed or exited');
+    this.stop();
+  }
+
+  async stop() {
+    console.log('stopping connection helper processes...');
+
+    // Stop listening for failures: they are all about to fail when we kill them.
+    this.setHelperListeners(undefined);
+
+    await this.routing.stop();
+    this.ssLocal.stop();
+    this.tun2socks.stop();
+
+    if (this.listener && this.currentId) {
+      this.listener(ConnectionStatus.DISCONNECTED, this.currentId);
+    }
+  }
+}
 
 // Uses the OS' built-in functions, i.e. /etc/hosts, et al.:
 // https://nodejs.org/dist/latest-v10.x/docs/api/dns.html#dns_dns

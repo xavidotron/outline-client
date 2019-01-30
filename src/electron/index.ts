@@ -26,7 +26,6 @@ import * as connectivity from './connectivity';
 import * as errors from '../www/model/errors';
 
 import {ConnectionStore, SerializableConnection} from './connection_store';
-import * as process_manager from './process_manager';
 
 // Used for the auto-connect feature. There will be a connection in store
 // if the user was connected at shutdown.
@@ -57,6 +56,9 @@ const trayIconImages = {
 const enum Options {
   AUTOSTART = '--autostart'
 }
+
+const connectionMediator = new connectivity.ConnectionMediator();
+connectionMediator.setListener(sendConnectionStatus);
 
 function createWindow(connectionAtShutdown?: SerializableConnection) {
   // Create the browser window.
@@ -271,7 +273,7 @@ app.on('activate', () => {
 });
 
 app.on('quit', () => {
-  process_manager.teardownVpn().catch((e) => {
+  connectionMediator.stop().catch((e) => {
     console.error(`could not tear down proxy on exit`, e);
   });
 });
@@ -286,35 +288,12 @@ promiseIpc.on('is-reachable', (config: cordova.plugins.outline.ServerConfig) => 
       });
 });
 
+// TODO: what if we're already connected? will the UI ever do that to us?
 function startVpn(config: cordova.plugins.outline.ServerConfig, id: string, isAutoConnect = false) {
-  return process_manager.teardownVpn()
-      .catch((e) => {
-        console.error(`error tearing down the VPN`, e);
-      })
-      .then(() => {
-        return process_manager
-            .startVpn(
-                config,
-                (status: ConnectionStatus) => {
-                  createTrayIcon(status);
-                  sendConnectionStatus(status, id);
-                  if (status === ConnectionStatus.DISCONNECTED) {
-                    connectionStore.clear().catch((err) => {
-                      console.error('Failed to clear connection store.');
-                    });
-                  }
-                },
-                isAutoConnect)
-            .then((newConfig) => {
-              connectionStore.save({config: newConfig, id}).catch((err) => {
-                console.error('Failed to store connection.');
-              });
-              sendConnectionStatus(ConnectionStatus.CONNECTED, id);
-              createTrayIcon(ConnectionStatus.CONNECTED);
-            });
-      });
+  return connectionMediator.start(config, id);
 }
 
+// TODO: update tray
 function sendConnectionStatus(status: ConnectionStatus, connectionId: string) {
   let statusString;
   switch (status) {
@@ -341,14 +320,11 @@ function sendConnectionStatus(status: ConnectionStatus, connectionId: string) {
 
 promiseIpc.on(
     'start-proxying', (args: {config: cordova.plugins.outline.ServerConfig, id: string}) => {
-      return startVpn(args.config, args.id).catch((e) => {
-        console.error(`could not connect: ${e.name} (${e.message})`);
-        throw errors.toErrorCode(e);
-      });
+      return connectionMediator.start(args.config, args.id);
     });
 
 promiseIpc.on('stop-proxying', () => {
-  return process_manager.teardownVpn();
+  return connectionMediator.stop();
 });
 
 // This event fires whenever the app's window receives focus.
