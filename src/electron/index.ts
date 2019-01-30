@@ -290,10 +290,13 @@ promiseIpc.on('is-reachable', (config: cordova.plugins.outline.ServerConfig) => 
 
 // TODO: what if we're already connected? will the UI ever do that to us?
 function startVpn(config: cordova.plugins.outline.ServerConfig, id: string, isAutoConnect = false) {
-  return connectionMediator.start(config, id);
+  return connectionMediator.start(config, id).then(() => {
+    // TODO: we only call this to update the system tray icon...ugly
+    sendConnectionStatus(ConnectionStatus.CONNECTED, id);
+  });
 }
 
-// TODO: update tray
+// Notifies the renderer process of the new status and updates the system tray.
 function sendConnectionStatus(status: ConnectionStatus, connectionId: string) {
   let statusString;
   switch (status) {
@@ -310,6 +313,7 @@ function sendConnectionStatus(status: ConnectionStatus, connectionId: string) {
       console.error(`Cannot send unknown proxy status: ${status}`);
       return;
   }
+  createTrayIcon(status);
   const event = `proxy-${statusString}-${connectionId}`;
   if (mainWindow) {
     mainWindow.webContents.send(event);
@@ -320,7 +324,10 @@ function sendConnectionStatus(status: ConnectionStatus, connectionId: string) {
 
 promiseIpc.on(
     'start-proxying', (args: {config: cordova.plugins.outline.ServerConfig, id: string}) => {
-      return connectionMediator.start(args.config, args.id);
+      return startVpn(args.config, args.id).catch((e) => {
+        console.error(`could not connect: ${e.name} (${e.message})`);
+        throw errors.toErrorCode(e);
+      });
     });
 
 promiseIpc.on('stop-proxying', () => {
