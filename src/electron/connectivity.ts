@@ -58,12 +58,9 @@ export class ConnectionMediator {
   private ssLocal = new SsLocal(PROXY_PORT);
   private tun2socks = new Tun2socks(PROXY_ADDRESS, PROXY_PORT);
 
-  // ugh horrible
-  private currentId: string|undefined;
+  private listener?: (status: ConnectionStatus) => void;
 
-  private listener?: (status: ConnectionStatus, connectionId: string) => void;
-
-  setListener(listener: (status: ConnectionStatus, connectionId: string) => void) {
+  setListener(listener: (status: ConnectionStatus) => void) {
     this.listener = listener;
   }
 
@@ -76,9 +73,8 @@ export class ConnectionMediator {
   // TODO: stop if already started?
   // TODO: check reachability
   // TODO: reject with error codes
-  async start(config: cordova.plugins.outline.ServerConfig, id: string) {
+  async start(config: cordova.plugins.outline.ServerConfig) {
     console.log('starting connection helper processes...');
-    this.currentId = id;
 
     this.setHelperListeners(this.onExitOrFailure.bind(this));
 
@@ -102,8 +98,8 @@ export class ConnectionMediator {
     this.ssLocal.stop();
     this.tun2socks.stop();
 
-    if (this.listener && this.currentId) {
-      this.listener(ConnectionStatus.DISCONNECTED, this.currentId);
+    if (this.listener) {
+      this.listener(ConnectionStatus.DISCONNECTED);
     }
   }
 }

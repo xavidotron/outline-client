@@ -60,6 +60,8 @@ const enum Options {
 const connectionMediator = new connectivity.ConnectionMediator();
 connectionMediator.setListener(sendConnectionStatus);
 
+let currentConnectionId: string|undefined;
+
 function createWindow(connectionAtShutdown?: SerializableConnection) {
   // Create the browser window.
   mainWindow = new BrowserWindow({width: 360, height: 640, resizable: false});
@@ -102,11 +104,11 @@ function createWindow(connectionAtShutdown?: SerializableConnection) {
     mainWindow!.webContents.send('localizationRequest', Object.keys(localizedStrings));
     interceptShadowsocksLink(process.argv);
     if (connectionAtShutdown) {
-      const serverId = connectionAtShutdown.id;
-      console.info(`Automatically starting connection ${serverId}`);
-      sendConnectionStatus(ConnectionStatus.RECONNECTING, serverId);
+      currentConnectionId = connectionAtShutdown.id;
+      console.info(`Automatically starting connection ${currentConnectionId}`);
+      sendConnectionStatus(ConnectionStatus.RECONNECTING);
       // TODO: Handle errors, report.
-      startVpn(connectionAtShutdown.config, serverId, true);
+      startVpn(connectionAtShutdown.config, currentConnectionId, true);
     }
   });
 
@@ -289,15 +291,17 @@ promiseIpc.on('is-reachable', (config: cordova.plugins.outline.ServerConfig) => 
 });
 
 // TODO: what if we're already connected? will the UI ever do that to us?
-function startVpn(config: cordova.plugins.outline.ServerConfig, id: string, isAutoConnect = false) {
-  return connectionMediator.start(config, id).then(() => {
+function startVpn(
+    config: cordova.plugins.outline.ServerConfig, connectionId: string, isAutoConnect = false) {
+  currentConnectionId = connectionId;
+  return connectionMediator.start(config).then(() => {
     // TODO: we only call this to update the system tray icon...ugly
-    sendConnectionStatus(ConnectionStatus.CONNECTED, id);
+    sendConnectionStatus(ConnectionStatus.CONNECTED);
   });
 }
 
 // Notifies the renderer process of the new status and updates the system tray.
-function sendConnectionStatus(status: ConnectionStatus, connectionId: string) {
+function sendConnectionStatus(status: ConnectionStatus) {
   let statusString;
   switch (status) {
     case ConnectionStatus.CONNECTED:
@@ -314,7 +318,7 @@ function sendConnectionStatus(status: ConnectionStatus, connectionId: string) {
       return;
   }
   createTrayIcon(status);
-  const event = `proxy-${statusString}-${connectionId}`;
+  const event = `proxy-${statusString}-${currentConnectionId}`;
   if (mainWindow) {
     mainWindow.webContents.send(event);
   } else {
