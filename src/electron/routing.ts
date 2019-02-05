@@ -122,7 +122,7 @@ export class RoutingService {
   }
 
   // TODO: autoconnect
-  // TODO: constructor param for TUN device IP
+  // TODO: remove routerIp param from the Windows service (it's baked into it on Linux)
   async start(proxyAddress: string) {
     // TODO: is this necessary and is there a better way?
     if (this.socket) {
