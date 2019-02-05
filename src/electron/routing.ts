@@ -15,6 +15,8 @@
 import {createConnection, Socket} from 'net';
 import {platform} from 'os';
 
+import * as errors from '../www/model/errors';
+
 interface RoutingServiceRequest {
   action: string;
   parameters: {[parameter: string]: string|boolean};
@@ -53,6 +55,11 @@ const SERVICE_ADDRESS =
 // as possible*: CONFIGURE_ROUTING always uses a *new* connection to the service and the socket is
 // always closed after receiving a RESET_ROUTING response.
 //
+// To test:
+//  - On Linux, run these commands to start/stop the service:
+//    sudo systemctl start outline_proxy_controller.service
+//    sudo systemctl stop outline_proxy_controller.service
+//
 // TODO: network change notifications
 export class RoutingService {
   private socket?: Socket;
@@ -60,6 +67,7 @@ export class RoutingService {
   private disconnectionListener?: () => void;
 
   private fulfillStart?: () => void;
+  private rejectStart?: (e: Error) => void;
   private fulfillStop?: () => void;
 
   // TODO: sets a member and returns that member for type-safety convenience - ugly?
@@ -76,11 +84,24 @@ export class RoutingService {
         newSocket.on('data', (data) => {
           // This is very useful for debugging and *does not contain any PII*.
           console.log(`received message from routing service: ${data.toString().trim()}`);
-          const res: RoutingServiceResponse = JSON.parse(data.toString());
-          switch (res.action) {
+          const responseFromService: RoutingServiceResponse = JSON.parse(data.toString());
+          switch (responseFromService.action) {
             case RoutingServiceAction.CONFIGURE_ROUTING:
-              if (this.fulfillStart) {
-                this.fulfillStart();
+              if (!(this.fulfillStart && this.rejectStart)) {
+                console.error('unexpected CONFIGURE_ROUTING response');
+                newSocket.end();
+                return;
+              }
+
+              switch (responseFromService.statusCode) {
+                case RoutingServiceStatusCode.SUCCESS:
+                  this.fulfillStart();
+                  break;
+                case RoutingServiceStatusCode.UNSUPPORTED_ROUTING_TABLE:
+                  this.rejectStart(new errors.UnsupportedRoutingTable());
+                  break;
+                default:
+                  this.rejectStart(new errors.ConfigureSystemProxyFailure());
               }
               break;
             case RoutingServiceAction.RESET_ROUTING:
@@ -111,7 +132,7 @@ export class RoutingService {
       // This is sufficient to detect a failure to connect initially; subsequent disconnections are
       // handled by the close handler, above.
       newSocket.once('error', (e) => {
-        R(new Error(`could not connect to routing service: ${e.message}`));
+        R(new errors.SystemConfigurationException());
       });
     });
   }
@@ -133,8 +154,9 @@ export class RoutingService {
       action: RoutingServiceAction.CONFIGURE_ROUTING,
       parameters: {'proxyIp': proxyAddress, 'routerIp': '10.0.85.1', 'isAutoConnect': false}
     }));
-    return new Promise<void>((F) => {
+    return new Promise<void>((F, R) => {
       this.fulfillStart = F;
+      this.rejectStart = R;
     });
   }
 

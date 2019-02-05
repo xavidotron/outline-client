@@ -72,7 +72,6 @@ export class ConnectionMediator {
 
   // TODO: stop if already started?
   // TODO: check reachability
-  // TODO: reject with error codes
   async start(config: cordova.plugins.outline.ServerConfig) {
     console.log('starting connection helper processes...');
 
