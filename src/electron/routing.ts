@@ -70,7 +70,6 @@ export class RoutingService {
     }
 
     return new Promise<Socket>((F, R) => {
-      // TODO: how long does the service take to restart - should we add a wait/retry?
       const newSocket = createConnection(SERVICE_ADDRESS, () => {
         console.log('connected to routing service');
 
