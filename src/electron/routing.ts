@@ -55,10 +55,13 @@ const SERVICE_ADDRESS =
 // as possible*: CONFIGURE_ROUTING always uses a *new* connection to the service and the socket is
 // always closed after receiving a RESET_ROUTING response.
 //
-// To test:
-//  - On Linux, run these commands to start/stop the service:
+// Run these commands to start/stop the service:
+//  - Linux:
 //    sudo systemctl start outline_proxy_controller.service
 //    sudo systemctl stop outline_proxy_controller.service
+//  - Windows:
+//    net stop OutlineService
+//    net start OutlineService
 //
 // TODO: network change notifications
 export class RoutingService {
@@ -93,18 +96,19 @@ export class RoutingService {
                 return;
               }
 
-              switch (responseFromService.statusCode) {
-                case RoutingServiceStatusCode.SUCCESS:
-                  this.fulfillStart();
-                  break;
-                case RoutingServiceStatusCode.UNSUPPORTED_ROUTING_TABLE:
-                  this.rejectStart(new errors.UnsupportedRoutingTable());
-                  break;
-                default:
-                  this.rejectStart(new errors.ConfigureSystemProxyFailure());
+              if (responseFromService.statusCode === RoutingServiceStatusCode.SUCCESS) {
+                this.fulfillStart();
+              } else {
+                this.rejectStart(
+                    responseFromService.statusCode ===
+                            RoutingServiceStatusCode.UNSUPPORTED_ROUTING_TABLE ?
+                        new errors.UnsupportedRoutingTable(responseFromService.errorMessage) :
+                        new errors.ConfigureSystemProxyFailure(responseFromService.errorMessage));
+                newSocket.end();
               }
               break;
             case RoutingServiceAction.RESET_ROUTING:
+              // TODO: handle failures
               if (this.fulfillStop) {
                 this.fulfillStop();
               }

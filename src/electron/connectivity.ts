@@ -72,6 +72,8 @@ export class ConnectionMediator {
 
   // TODO: stop if already started?
   // TODO: check reachability
+  // TODO: because the processes' start() methods never throws *this will never reject
+  //       if they fail*, meaning ShadowsocksStartFailure is never sent to the frontend
   async start(config: cordova.plugins.outline.ServerConfig) {
     console.log('starting connection helper processes...');
 
@@ -93,6 +95,7 @@ export class ConnectionMediator {
     // Stop listening for failures: they are all about to fail when we kill them.
     this.setHelperListeners(undefined);
 
+    // TODO: if the service is *down* then this can never resolve
     await this.routing.stop();
     this.ssLocal.stop();
     this.tun2socks.stop();
