@@ -133,9 +133,10 @@ public class VpnTunnel {
    * @throws Exception when the tunnel fails to connect.
    */
   public synchronized void connectTunnel(
-      final String socksServerIp, short socksServerPort, boolean isUdpSupported) throws Exception {
+      final String shadowsocksServerIp, int shadowsocksServerPort, final String password,
+      boolean isUdpSupported) throws Exception {
     LOG.info("Connecting the tunnel.");
-    if (socksServerIp == null || socksServerPort <= 0) {
+    if (shadowsocksServerIp == null || shadowsocksServerPort <= 0) {
       throw new IllegalArgumentException("Must provide an IP address and port to a SOCKS server.");
     }
     if (tunFd == null) {
@@ -147,7 +148,8 @@ public class VpnTunnel {
 
     LOG.fine("Starting tun2socks...");
     tunnel =
-        Tun2socks.connectSocksTunnel(tunFd.getFd(), socksServerIp, socksServerPort, isUdpSupported);
+        Tun2socks.connectShadowsocksTunnel(tunFd.getFd(), shadowsocksServerIp, shadowsocksServerPort, password,
+            isUdpSupported);
   }
 
   /* Disconnects a tunnel created by a previous call to |connectTunnel|. */
